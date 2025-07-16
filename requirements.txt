@@ -1,3 +1,4 @@
 yt-dlp==2024.1.7
 requests==2.31.0
 replicate==0.25.1
+pathlib
