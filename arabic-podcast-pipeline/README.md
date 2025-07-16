@@ -1,4 +1,4 @@
-# Arabic Podcast Pipeline
+# Eltemsa7 transcription Pipeline
 
 A comprehensive pipeline for processing Arabic podcasts with automatic transcription, speaker diarization, and speaker labeling.
 
