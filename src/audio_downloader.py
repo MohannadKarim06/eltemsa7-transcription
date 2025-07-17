@@ -1,21 +1,24 @@
 import os
 import logging
 import yt_dlp
+import re
 from pathlib import Path
 from typing import List, Optional
 
-# Configure logging (consistent with other modules)
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Arabic to English digit map
+ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
 class AudioDownloader:
-    """Handles downloading audio from YouTube playlists or individual videos"""
-    
+    """Handles downloading audio and renaming files with consistent episode IDs"""
+
     def __init__(self, output_dir: str):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Configure yt-dlp options
+
         self.ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -24,127 +27,111 @@ class AudioDownloader:
                 'preferredquality': '192',
             }],
             'outtmpl': str(self.output_dir / '%(title)s.%(ext)s'),
-            'writeinfojson': True,  # Save metadata
-            'writethumbnail': False,
-            'ignoreerrors': True,  # Continue on errors
+            'writeinfojson': True,
+            'ignoreerrors': True,
             'no_warnings': False,
             'extractaudio': True,
             'audioformat': 'mp3',
-            'embed_subs': False,
-            'writesubtitles': False,
         }
-        
+
         logger.info(f"AudioDownloader initialized with output directory: {self.output_dir}")
 
     def download_playlist(self, playlist_url: str) -> List[str]:
-        """
-        Download all audio files from a YouTube playlist
-        
-        Args:
-            playlist_url: URL of the YouTube playlist
-            
-        Returns:
-            List of downloaded file paths
-        """
         downloaded_files = []
-        
+
         try:
-            logger.info(f"Starting playlist download from: {playlist_url}")
-            
+            logger.info(f"Downloading from playlist: {playlist_url}")
+
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                # First, extract playlist info to get video count
-                try:
-                    playlist_info = ydl.extract_info(playlist_url, download=False)
-                    video_count = len(playlist_info.get('entries', []))
-                    logger.info(f"Found {video_count} videos in playlist")
-                except Exception as e:
-                    logger.error(f"Failed to extract playlist info: {e}")
-                    return []
-                
-                # Download the playlist
-                try:
-                    ydl.download([playlist_url])
-                    logger.info("Download process completed")
-                except Exception as e:
-                    logger.error(f"Download process failed: {e}")
-                    return []
-            
-            # Find downloaded files
+                ydl.download([playlist_url])
+
             downloaded_files = self._find_downloaded_files()
-            logger.info(f"Successfully downloaded {len(downloaded_files)} audio files")
-            
-            return downloaded_files
-            
+            logger.info(f"Downloaded {len(downloaded_files)} files")
+
+            renamed_files = self._rename_to_episode_ids(downloaded_files)
+            logger.info(f"{len(renamed_files)} valid episode files after renaming")
+            return renamed_files
+
         except Exception as e:
-            logger.error(f"Playlist download failed: {e}")
+            logger.error(f"Error downloading playlist: {e}")
             return []
 
     def download_single_video(self, video_url: str) -> Optional[str]:
-        """
-        Download audio from a single YouTube video
-        
-        Args:
-            video_url: URL of the YouTube video
-            
-        Returns:
-            Path to downloaded file or None if failed
-        """
         try:
             logger.info(f"Downloading single video: {video_url}")
-            
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                 ydl.download([video_url])
-            
-            # Find the downloaded file
+
             downloaded_files = self._find_downloaded_files()
-            if downloaded_files:
-                latest_file = max(downloaded_files, key=lambda f: Path(f).stat().st_mtime)
-                logger.info(f"Successfully downloaded: {latest_file}")
-                return latest_file
-            else:
-                logger.error("No files found after download")
+            if not downloaded_files:
                 return None
-                
+
+            renamed_files = self._rename_to_episode_ids(downloaded_files)
+            return renamed_files[0] if renamed_files else None
+
         except Exception as e:
-            logger.error(f"Single video download failed: {e}")
+            logger.error(f"Error downloading single video: {e}")
             return None
 
     def _find_downloaded_files(self) -> List[str]:
-        """Find all downloaded audio files in the output directory"""
-        audio_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg']
-        downloaded_files = []
-        
-        for ext in audio_extensions:
-            pattern = f"*{ext}"
-            files = list(self.output_dir.glob(pattern))
-            downloaded_files.extend([str(f) for f in files])
-        
-        return sorted(downloaded_files)
+        return [str(f) for f in self.output_dir.glob("*.mp3")]
+
+    def _rename_to_episode_ids(self, file_paths: List[str]) -> List[str]:
+        renamed_files = []
+        used_numbers = set()
+
+        for path in file_paths:
+            path = Path(path)
+            episode_number = self._extract_arabic_episode_number(path.stem)
+
+            if episode_number is None:
+                logger.warning(f"No episode number found in title: {path.name}. Deleting.")
+                path.unlink(missing_ok=True)
+                continue
+
+            # Avoid duplicates
+            if episode_number in used_numbers:
+                logger.warning(f"Duplicate episode number {episode_number} detected. Skipping file: {path.name}")
+                path.unlink(missing_ok=True)
+                continue
+
+            used_numbers.add(episode_number)
+            new_name = f"episode_{int(episode_number):03d}{path.suffix}"
+            new_path = path.with_name(new_name)
+
+            try:
+                path.rename(new_path)
+                renamed_files.append(str(new_path))
+                logger.info(f"Renamed {path.name} → {new_name}")
+            except Exception as e:
+                logger.error(f"Failed to rename {path.name}: {e}")
+                continue
+
+        return renamed_files
+
+    def _extract_arabic_episode_number(self, text: str) -> Optional[int]:
+        # Arabic digits: ٠١٢٣٤٥٦٧٨٩
+        matches = re.findall(r'[٠١٢٣٤٥٦٧٨٩]+', text)
+        if matches:
+            try:
+                number = int(matches[0].translate(ARABIC_DIGITS))
+                return number
+            except ValueError:
+                return None
+        return None
 
     def cleanup_metadata_files(self):
-        """Clean up metadata files (.info.json) created during download"""
-        try:
-            info_files = list(self.output_dir.glob("*.info.json"))
-            for info_file in info_files:
-                info_file.unlink()
-                logger.debug(f"Cleaned up metadata file: {info_file}")
-            
-            if info_files:
-                logger.info(f"Cleaned up {len(info_files)} metadata files")
-                
-        except Exception as e:
-            logger.error(f"Failed to cleanup metadata files: {e}")
+        for f in self.output_dir.glob("*.info.json"):
+            f.unlink(missing_ok=True)
 
     def get_existing_files(self) -> List[str]:
-        """Get list of existing audio files in the output directory"""
         return self._find_downloaded_files()
 
     def validate_url(self, url: str) -> bool:
-        """Validate if the URL is a valid YouTube URL"""
         try:
             with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return info is not None
         except Exception as e:
-            logger.error(f"URL validation failed for {url}: {e}")
+            logger.error(f"URL validation failed: {e}")
             return False
